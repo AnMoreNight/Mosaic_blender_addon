@@ -2,257 +2,258 @@ bl_info = {
     "name": "Mosaic Effect",
     "author": "Custom",
     "version": (1, 0, 0),
-    "blender": (3, 0, 0),
-    "location": "View3D > Sidebar > Mosaic",
-    "description": "Apply mosaic/pixelation effect to selected objects during rendering",
+    "blender": (5, 0, 0),
+    "location": "Render Properties",
+    "description": "Apply mosaic/pixelation effect to selected objects",
     "category": "Render",
 }
 
 import bpy
 from bpy.props import IntProperty, BoolProperty, CollectionProperty, StringProperty
-from bpy.types import Panel, Operator, PropertyGroup
+from bpy.types import Panel, PropertyGroup, Operator
 
-# Property to store mosaic targets
-class MosaicTarget(PropertyGroup):
+class MosaicObjectItem(PropertyGroup):
     obj_name: StringProperty()
 
-# Scene properties
 class MosaicProperties(PropertyGroup):
-    mosaic_size: IntProperty(
-        name="Mosaic Size",
-        description="Size of mosaic blocks (higher = more pixelated)",
-        default=20,
-        min=2,
-        max=200
-    )
     enabled: BoolProperty(
-        name="Enable Effect",
-        description="Enable/disable mosaic effect",
-        default=True
+        name="Enable Mosaic Effect",
+        description="Apply mosaic effect to renders",
+        default=False
     )
-    targets: CollectionProperty(type=MosaicTarget)
+    pixel_size: IntProperty(
+        name="Pixel Size",
+        description="Size of mosaic blocks",
+        default=8,
+        min=2,
+        max=50
+    )
+    selected_objects: CollectionProperty(type=MosaicObjectItem)
 
-# Create mosaic shader nodes
-def create_mosaic_material(obj, mosaic_size):
-    mat_name = f"Mosaic_{obj.name}"
+def setup_view_layers(context):
+    scene = context.scene
+    props = scene.mosaic_props
     
-    # Remove existing mosaic material if present
-    if mat_name in bpy.data.materials:
-        bpy.data.materials.remove(bpy.data.materials[mat_name])
+    # Create collection for selected objects
+    if "MosaicObjects" not in bpy.data.collections:
+        mosaic_col = bpy.data.collections.new("MosaicObjects")
+        scene.collection.children.link(mosaic_col)
+    else:
+        mosaic_col = bpy.data.collections["MosaicObjects"]
     
-    mat = bpy.data.materials.new(name=mat_name)
-    mat.use_nodes = True
-    nodes = mat.node_tree.nodes
-    links = mat.node_tree.links
+    # Create collection for lights/camera
+    if "SceneLights" not in bpy.data.collections:
+        lights_col = bpy.data.collections.new("SceneLights")
+        scene.collection.children.link(lights_col)
+    else:
+        lights_col = bpy.data.collections["SceneLights"]
     
-    nodes.clear()
+    # Move lights and cameras to SceneLights collection (keep in original too)
+    for col in bpy.data.collections:
+        for obj in list(col.objects):
+            if obj.type in ('LIGHT', 'CAMERA'):
+                if obj.name not in lights_col.objects:
+                    lights_col.objects.link(obj)
     
-    # Create nodes
-    output = nodes.new('ShaderNodeOutputMaterial')
-    output.location = (600, 0)
+    # Clear mosaic collection
+    for obj in list(mosaic_col.objects):
+        mosaic_col.objects.unlink(obj)
     
-    emission = nodes.new('ShaderNodeEmission')
-    emission.location = (400, 0)
+    # Add selected objects to mosaic collection (keep in original collections too)
+    for item in props.selected_objects:
+        obj = bpy.data.objects.get(item.obj_name)
+        if obj and obj.name not in mosaic_col.objects:
+            mosaic_col.objects.link(obj)
     
-    # Texture coordinate
-    tex_coord = nodes.new('ShaderNodeTexCoord')
-    tex_coord.location = (-600, 0)
+    # Create view layers
+    if "MosaicOnly" not in scene.view_layers:
+        scene.view_layers.new("MosaicOnly")
+    if "WithoutMosaic" not in scene.view_layers:
+        scene.view_layers.new("WithoutMosaic")
     
-    # Vector math for pixelation
-    multiply = nodes.new('ShaderNodeVectorMath')
-    multiply.operation = 'MULTIPLY'
-    multiply.location = (-400, 0)
-    multiply.inputs[1].default_value = (mosaic_size, mosaic_size, mosaic_size)
+    # Configure MosaicOnly layer (show ONLY MosaicObjects + SceneLights)
+    vl_mosaic = scene.view_layers["MosaicOnly"]
+    for lc in vl_mosaic.layer_collection.children:
+        if lc.collection.name in ("MosaicObjects", "SceneLights"):
+            lc.exclude = False
+        else:
+            lc.exclude = True
     
-    floor_node = nodes.new('ShaderNodeVectorMath')
-    floor_node.operation = 'FLOOR'
-    floor_node.location = (-200, 0)
-    
-    divide = nodes.new('ShaderNodeVectorMath')
-    divide.operation = 'DIVIDE'
-    divide.location = (0, 0)
-    divide.inputs[1].default_value = (mosaic_size, mosaic_size, mosaic_size)
-    
-    # Color based on position
-    color_ramp = nodes.new('ShaderNodeValToRGB')
-    color_ramp.location = (200, 0)
-    
-    separate = nodes.new('ShaderNodeSeparateXYZ')
-    separate.location = (0, -200)
-    
-    combine = nodes.new('ShaderNodeCombineXYZ')
-    combine.location = (200, -200)
-    
-    # Link nodes
-    links.new(tex_coord.outputs['Object'], multiply.inputs[0])
-    links.new(multiply.outputs[0], floor_node.inputs[0])
-    links.new(floor_node.outputs[0], divide.inputs[0])
-    links.new(divide.outputs[0], separate.inputs[0])
-    links.new(separate.outputs[0], combine.inputs[0])
-    links.new(separate.outputs[1], combine.inputs[1])
-    links.new(separate.outputs[2], combine.inputs[2])
-    links.new(combine.outputs[0], emission.inputs[0])
-    links.new(emission.outputs[0], output.inputs[0])
-    
-    return mat
+    # Configure WithoutMosaic layer (show everything EXCEPT MosaicObjects)
+    vl_without = scene.view_layers["WithoutMosaic"]
+    for lc in vl_without.layer_collection.children:
+        if lc.collection.name == "MosaicObjects":
+            lc.exclude = True
+        else:
+            lc.exclude = False
 
-# Operator: Add selected objects as mosaic targets
-class MOSAIC_OT_add_targets(Operator):
-    bl_idname = "mosaic.add_targets"
+def update_compositor(context):
+    scene = context.scene
+    props = scene.mosaic_props
+    
+    scene.render.use_compositing = True
+    
+    if not scene.compositing_node_group:
+        tree = bpy.data.node_groups.new(name="MosaicCompositor", type='CompositorNodeTree')
+        scene.compositing_node_group = tree
+    else:
+        tree = scene.compositing_node_group
+    
+    tree.nodes.clear()
+    tree.interface.clear()
+    
+    output = tree.nodes.new('NodeGroupOutput')
+    tree.interface.new_socket(name="Image", in_out='OUTPUT', socket_type='NodeSocketColor')
+    
+    if not props.enabled or len(props.selected_objects) == 0:
+        scene.render.film_transparent = False
+        render_layers = tree.nodes.new('CompositorNodeRLayers')
+        render_layers.location = (0, 0)
+        output.location = (200, 0)
+        tree.links.new(render_layers.outputs['Image'], output.inputs[0])
+        return
+    
+    # Enable transparent background for proper compositing
+    scene.render.film_transparent = True
+    
+    # Setup view layers
+    setup_view_layers(context)
+    
+    # Render layer for objects WITHOUT mosaic
+    rl_without = tree.nodes.new('CompositorNodeRLayers')
+    rl_without.location = (0, 0)
+    rl_without.layer = "WithoutMosaic"
+    
+    # Render layer for objects WITH mosaic
+    rl_mosaic = tree.nodes.new('CompositorNodeRLayers')
+    rl_mosaic.location = (0, 200)
+    rl_mosaic.layer = "MosaicOnly"
+    
+    # Pixelate the mosaic layer
+    pixelate = tree.nodes.new('CompositorNodePixelate')
+    pixelate.location = (200, 200)
+    pixelate.inputs['Size'].default_value = props.pixel_size
+    
+    # Composite pixelated over non-pixelated
+    alpha_over = tree.nodes.new('CompositorNodeAlphaOver')
+    alpha_over.location = (400, 0)
+    
+    # Add background color (world color)
+    bg_color = tree.nodes.new('CompositorNodeRGB')
+    bg_color.location = (200, -200)
+    if scene.world and scene.world.use_nodes:
+        # Try to get world color
+        bg_color.outputs[0].default_value = (0.05, 0.05, 0.05, 1.0)  # Dark gray default
+    else:
+        bg_color.outputs[0].default_value = (0.05, 0.05, 0.05, 1.0)
+    
+    # Composite result over background
+    alpha_over2 = tree.nodes.new('CompositorNodeAlphaOver')
+    alpha_over2.location = (600, 0)
+    
+    output.location = (800, 0)
+    
+    # Links
+    tree.links.new(rl_mosaic.outputs['Image'], pixelate.inputs['Color'])
+    tree.links.new(rl_without.outputs['Image'], alpha_over.inputs[0])  # Background
+    tree.links.new(pixelate.outputs['Color'], alpha_over.inputs[1])  # Foreground
+    tree.links.new(bg_color.outputs[0], alpha_over2.inputs[0])  # Solid background
+    tree.links.new(alpha_over.outputs['Image'], alpha_over2.inputs[1])  # Composited result
+    tree.links.new(alpha_over2.outputs['Image'], output.inputs[0])
+    
+    for area in context.screen.areas:
+        if area.type == 'NODE_EDITOR':
+            area.spaces.active.tree_type = 'CompositorNodeTree'
+            area.spaces.active.node_tree = tree
+            break
+
+class MOSAIC_OT_add_selected(Operator):
+    bl_idname = "mosaic.add_selected"
     bl_label = "Add Selected Objects"
-    bl_description = "Add selected objects as mosaic targets"
+    bl_description = "Add selected objects to mosaic list"
     
     def execute(self, context):
         props = context.scene.mosaic_props
+        props.selected_objects.clear()
         
         for obj in context.selected_objects:
             if obj.type == 'MESH':
-                # Check if already in targets
-                if not any(t.obj_name == obj.name for t in props.targets):
-                    target = props.targets.add()
-                    target.obj_name = obj.name
-                    
-                    # Apply mosaic material
-                    mat = create_mosaic_material(obj, props.mosaic_size)
-                    if obj.data.materials:
-                        obj.data.materials[0] = mat
-                    else:
-                        obj.data.materials.append(mat)
+                item = props.selected_objects.add()
+                item.obj_name = obj.name
         
-        self.report({'INFO'}, f"Added {len(context.selected_objects)} object(s)")
+        self.report({'INFO'}, f"Added {len(props.selected_objects)} object(s)")
         return {'FINISHED'}
 
-# Operator: Remove selected objects from mosaic targets
-class MOSAIC_OT_remove_targets(Operator):
-    bl_idname = "mosaic.remove_targets"
-    bl_label = "Remove Selected Objects"
-    bl_description = "Remove selected objects from mosaic targets"
+class MOSAIC_OT_clear_objects(Operator):
+    bl_idname = "mosaic.clear_objects"
+    bl_label = "Clear"
+    bl_description = "Clear object list"
     
     def execute(self, context):
-        props = context.scene.mosaic_props
-        
-        for obj in context.selected_objects:
-            for i, target in enumerate(props.targets):
-                if target.obj_name == obj.name:
-                    props.targets.remove(i)
-                    
-                    # Remove mosaic material
-                    mat_name = f"Mosaic_{obj.name}"
-                    if mat_name in bpy.data.materials:
-                        mat = bpy.data.materials[mat_name]
-                        if obj.data.materials:
-                            for j, m in enumerate(obj.data.materials):
-                                if m == mat:
-                                    obj.data.materials.pop(index=j)
-                                    break
-                    break
-        
-        self.report({'INFO'}, "Removed selected object(s)")
+        context.scene.mosaic_props.selected_objects.clear()
         return {'FINISHED'}
 
-# Operator: Clear all mosaic targets
-class MOSAIC_OT_clear_targets(Operator):
-    bl_idname = "mosaic.clear_targets"
-    bl_label = "Clear All"
-    bl_description = "Remove all mosaic targets"
+class MOSAIC_OT_apply(Operator):
+    bl_idname = "mosaic.apply"
+    bl_label = "Apply Mosaic"
+    bl_description = "Apply mosaic effect to compositor"
     
     def execute(self, context):
+        update_compositor(context)
         props = context.scene.mosaic_props
-        
-        for target in props.targets:
-            obj = bpy.data.objects.get(target.obj_name)
-            if obj:
-                mat_name = f"Mosaic_{obj.name}"
-                if mat_name in bpy.data.materials:
-                    mat = bpy.data.materials[mat_name]
-                    if obj.data.materials:
-                        for i, m in enumerate(obj.data.materials):
-                            if m == mat:
-                                obj.data.materials.pop(index=i)
-                                break
-        
-        props.targets.clear()
-        self.report({'INFO'}, "Cleared all targets")
+        if props.enabled and len(props.selected_objects) > 0:
+            self.report({'INFO'}, f"Mosaic applied to {len(props.selected_objects)} object(s)")
+        else:
+            self.report({'INFO'}, "Mosaic disabled")
         return {'FINISHED'}
 
-# Operator: Update mosaic size
-class MOSAIC_OT_update_size(Operator):
-    bl_idname = "mosaic.update_size"
-    bl_label = "Update Mosaic Size"
-    bl_description = "Update mosaic size for all targets"
-    
-    def execute(self, context):
-        props = context.scene.mosaic_props
-        
-        for target in props.targets:
-            obj = bpy.data.objects.get(target.obj_name)
-            if obj:
-                mat = create_mosaic_material(obj, props.mosaic_size)
-                if obj.data.materials:
-                    obj.data.materials[0] = mat
-                else:
-                    obj.data.materials.append(mat)
-        
-        self.report({'INFO'}, f"Updated mosaic size to {props.mosaic_size}")
-        return {'FINISHED'}
-
-# UI Panel
-class MOSAIC_PT_panel(Panel):
+class MOSAIC_PT_render_panel(Panel):
     bl_label = "Mosaic Effect"
-    bl_idname = "MOSAIC_PT_panel"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = 'Mosaic'
+    bl_idname = "MOSAIC_PT_render_panel"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "render"
+    
+    def draw_header(self, context):
+        self.layout.prop(context.scene.mosaic_props, "enabled", text="")
     
     def draw(self, context):
         layout = self.layout
         props = context.scene.mosaic_props
         
-        # Enable/Disable
-        layout.prop(props, "enabled")
+        layout.enabled = props.enabled
+        layout.prop(props, "pixel_size")
         
-        layout.separator()
-        
-        # Mosaic size
-        row = layout.row()
-        row.prop(props, "mosaic_size")
-        row.operator("mosaic.update_size", text="", icon='FILE_REFRESH')
-        
-        layout.separator()
-        
-        # Add/Remove buttons
-        layout.operator("mosaic.add_targets", icon='ADD')
-        layout.operator("mosaic.remove_targets", icon='REMOVE')
-        layout.operator("mosaic.clear_targets", icon='X')
-        
-        layout.separator()
-        
-        # List of targets
         box = layout.box()
-        box.label(text=f"Targets ({len(props.targets)}):")
-        for target in props.targets:
-            box.label(text=f"  • {target.obj_name}")
-
-# Registration
-classes = (
-    MosaicTarget,
-    MosaicProperties,
-    MOSAIC_OT_add_targets,
-    MOSAIC_OT_remove_targets,
-    MOSAIC_OT_clear_targets,
-    MOSAIC_OT_update_size,
-    MOSAIC_PT_panel,
-)
+        box.label(text="Objects:")
+        box.operator("mosaic.add_selected", icon='ADD')
+        
+        for item in props.selected_objects:
+            row = box.row()
+            row.label(text=item.obj_name, icon='OBJECT_DATA')
+        
+        if len(props.selected_objects) > 0:
+            box.operator("mosaic.clear_objects", icon='X')
+        
+        layout.operator("mosaic.apply", icon='FILE_REFRESH')
 
 def register():
-    for cls in classes:
-        bpy.utils.register_class(cls)
+    bpy.utils.register_class(MosaicObjectItem)
+    bpy.utils.register_class(MosaicProperties)
+    bpy.utils.register_class(MOSAIC_OT_add_selected)
+    bpy.utils.register_class(MOSAIC_OT_clear_objects)
+    bpy.utils.register_class(MOSAIC_OT_apply)
+    bpy.utils.register_class(MOSAIC_PT_render_panel)
     bpy.types.Scene.mosaic_props = bpy.props.PointerProperty(type=MosaicProperties)
 
 def unregister():
-    for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
     del bpy.types.Scene.mosaic_props
+    bpy.utils.unregister_class(MOSAIC_PT_render_panel)
+    bpy.utils.unregister_class(MOSAIC_OT_apply)
+    bpy.utils.unregister_class(MOSAIC_OT_clear_objects)
+    bpy.utils.unregister_class(MOSAIC_OT_add_selected)
+    bpy.utils.unregister_class(MosaicProperties)
+    bpy.utils.unregister_class(MosaicObjectItem)
 
 if __name__ == "__main__":
     register()
