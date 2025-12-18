@@ -34,44 +34,37 @@ def setup_view_layers(context):
     scene = context.scene
     props = scene.mosaic_props
     
-    # Create collection for selected objects
     if "MosaicObjects" not in bpy.data.collections:
         mosaic_col = bpy.data.collections.new("MosaicObjects")
         scene.collection.children.link(mosaic_col)
     else:
         mosaic_col = bpy.data.collections["MosaicObjects"]
     
-    # Create collection for lights/camera
     if "SceneLights" not in bpy.data.collections:
         lights_col = bpy.data.collections.new("SceneLights")
         scene.collection.children.link(lights_col)
     else:
         lights_col = bpy.data.collections["SceneLights"]
     
-    # Move lights and cameras to SceneLights collection (keep in original too)
     for col in bpy.data.collections:
         for obj in list(col.objects):
             if obj.type in ('LIGHT', 'CAMERA'):
                 if obj.name not in lights_col.objects:
                     lights_col.objects.link(obj)
     
-    # Clear mosaic collection
     for obj in list(mosaic_col.objects):
         mosaic_col.objects.unlink(obj)
     
-    # Add selected objects to mosaic collection (keep in original collections too)
     for item in props.selected_objects:
         obj = bpy.data.objects.get(item.obj_name)
         if obj and obj.name not in mosaic_col.objects:
             mosaic_col.objects.link(obj)
     
-    # Create view layers
     if "MosaicOnly" not in scene.view_layers:
         scene.view_layers.new("MosaicOnly")
     if "WithoutMosaic" not in scene.view_layers:
         scene.view_layers.new("WithoutMosaic")
     
-    # Configure MosaicOnly layer (show ONLY MosaicObjects + SceneLights)
     vl_mosaic = scene.view_layers["MosaicOnly"]
     for lc in vl_mosaic.layer_collection.children:
         if lc.collection.name in ("MosaicObjects", "SceneLights"):
@@ -79,7 +72,6 @@ def setup_view_layers(context):
         else:
             lc.exclude = True
     
-    # Configure WithoutMosaic layer (show everything EXCEPT MosaicObjects)
     vl_without = scene.view_layers["WithoutMosaic"]
     for lc in vl_without.layer_collection.children:
         if lc.collection.name == "MosaicObjects":
@@ -113,53 +105,42 @@ def update_compositor(context):
         tree.links.new(render_layers.outputs['Image'], output.inputs[0])
         return
     
-    # Enable transparent background for proper compositing
     scene.render.film_transparent = True
     
-    # Setup view layers
     setup_view_layers(context)
     
-    # Render layer for objects WITHOUT mosaic
     rl_without = tree.nodes.new('CompositorNodeRLayers')
     rl_without.location = (0, 0)
     rl_without.layer = "WithoutMosaic"
     
-    # Render layer for objects WITH mosaic
     rl_mosaic = tree.nodes.new('CompositorNodeRLayers')
     rl_mosaic.location = (0, 200)
     rl_mosaic.layer = "MosaicOnly"
     
-    # Pixelate the mosaic layer
     pixelate = tree.nodes.new('CompositorNodePixelate')
     pixelate.location = (200, 200)
     pixelate.inputs['Size'].default_value = props.pixel_size
     
-    # Composite pixelated over non-pixelated
-    alpha_over = tree.nodes.new('CompositorNodeAlphaOver')
-    alpha_over.location = (400, 0)
+    z_combine = tree.nodes.new('CompositorNodeZcombine')
+    z_combine.location = (400, 0)
     
-    # Add background color (world color)
     bg_color = tree.nodes.new('CompositorNodeRGB')
     bg_color.location = (200, -200)
-    if scene.world and scene.world.use_nodes:
-        # Try to get world color
-        bg_color.outputs[0].default_value = (0.05, 0.05, 0.05, 1.0)  # Dark gray default
-    else:
-        bg_color.outputs[0].default_value = (0.05, 0.05, 0.05, 1.0)
+    bg_color.outputs[0].default_value = (0.05, 0.05, 0.05, 1.0)
     
-    # Composite result over background
-    alpha_over2 = tree.nodes.new('CompositorNodeAlphaOver')
-    alpha_over2.location = (600, 0)
+    alpha_over = tree.nodes.new('CompositorNodeAlphaOver')
+    alpha_over.location = (600, 0)
     
     output.location = (800, 0)
     
-    # Links
     tree.links.new(rl_mosaic.outputs['Image'], pixelate.inputs['Color'])
-    tree.links.new(rl_without.outputs['Image'], alpha_over.inputs[0])  # Background
-    tree.links.new(pixelate.outputs['Color'], alpha_over.inputs[1])  # Foreground
-    tree.links.new(bg_color.outputs[0], alpha_over2.inputs[0])  # Solid background
-    tree.links.new(alpha_over.outputs['Image'], alpha_over2.inputs[1])  # Composited result
-    tree.links.new(alpha_over2.outputs['Image'], output.inputs[0])
+    tree.links.new(rl_without.outputs['Image'], z_combine.inputs[0])
+    tree.links.new(rl_without.outputs['Depth'], z_combine.inputs[1])
+    tree.links.new(pixelate.outputs['Color'], z_combine.inputs[2])
+    tree.links.new(rl_mosaic.outputs['Depth'], z_combine.inputs[3])
+    tree.links.new(bg_color.outputs[0], alpha_over.inputs[0])
+    tree.links.new(z_combine.outputs[0], alpha_over.inputs[1])
+    tree.links.new(alpha_over.outputs[0], output.inputs[0])
     
     for area in context.screen.areas:
         if area.type == 'NODE_EDITOR':
@@ -174,14 +155,27 @@ class MOSAIC_OT_add_selected(Operator):
     
     def execute(self, context):
         props = context.scene.mosaic_props
-        props.selected_objects.clear()
+        existing = {item.obj_name for item in props.selected_objects}
+        added = 0
         
         for obj in context.selected_objects:
-            if obj.type == 'MESH':
+            if obj.type == 'MESH' and obj.name not in existing:
                 item = props.selected_objects.add()
                 item.obj_name = obj.name
+                added += 1
         
-        self.report({'INFO'}, f"Added {len(props.selected_objects)} object(s)")
+        self.report({'INFO'}, f"Added {added} object(s), total: {len(props.selected_objects)}")
+        return {'FINISHED'}
+
+class MOSAIC_OT_remove_object(Operator):
+    bl_idname = "mosaic.remove_object"
+    bl_label = "Remove"
+    bl_description = "Remove object from list"
+    
+    index: IntProperty()
+    
+    def execute(self, context):
+        context.scene.mosaic_props.selected_objects.remove(self.index)
         return {'FINISHED'}
 
 class MOSAIC_OT_clear_objects(Operator):
@@ -228,12 +222,14 @@ class MOSAIC_PT_render_panel(Panel):
         box.label(text="Objects:")
         box.operator("mosaic.add_selected", icon='ADD')
         
-        for item in props.selected_objects:
+        for i, item in enumerate(props.selected_objects):
             row = box.row()
             row.label(text=item.obj_name, icon='OBJECT_DATA')
+            op = row.operator("mosaic.remove_object", text="", icon='X')
+            op.index = i
         
         if len(props.selected_objects) > 0:
-            box.operator("mosaic.clear_objects", icon='X')
+            box.operator("mosaic.clear_objects", icon='TRASH')
         
         layout.operator("mosaic.apply", icon='FILE_REFRESH')
 
@@ -241,6 +237,7 @@ def register():
     bpy.utils.register_class(MosaicObjectItem)
     bpy.utils.register_class(MosaicProperties)
     bpy.utils.register_class(MOSAIC_OT_add_selected)
+    bpy.utils.register_class(MOSAIC_OT_remove_object)
     bpy.utils.register_class(MOSAIC_OT_clear_objects)
     bpy.utils.register_class(MOSAIC_OT_apply)
     bpy.utils.register_class(MOSAIC_PT_render_panel)
@@ -251,6 +248,7 @@ def unregister():
     bpy.utils.unregister_class(MOSAIC_PT_render_panel)
     bpy.utils.unregister_class(MOSAIC_OT_apply)
     bpy.utils.unregister_class(MOSAIC_OT_clear_objects)
+    bpy.utils.unregister_class(MOSAIC_OT_remove_object)
     bpy.utils.unregister_class(MOSAIC_OT_add_selected)
     bpy.utils.unregister_class(MosaicProperties)
     bpy.utils.unregister_class(MosaicObjectItem)
