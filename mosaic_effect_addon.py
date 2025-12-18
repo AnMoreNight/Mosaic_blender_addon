@@ -66,6 +66,7 @@ def setup_view_layers(context):
         scene.view_layers.new("WithoutMosaic")
     
     vl_mosaic = scene.view_layers["MosaicOnly"]
+    vl_mosaic.use_pass_z = True
     for lc in vl_mosaic.layer_collection.children:
         if lc.collection.name in ("MosaicObjects", "SceneLights"):
             lc.exclude = False
@@ -73,6 +74,7 @@ def setup_view_layers(context):
             lc.exclude = True
     
     vl_without = scene.view_layers["WithoutMosaic"]
+    vl_without.use_pass_z = True
     for lc in vl_without.layer_collection.children:
         if lc.collection.name == "MosaicObjects":
             lc.exclude = True
